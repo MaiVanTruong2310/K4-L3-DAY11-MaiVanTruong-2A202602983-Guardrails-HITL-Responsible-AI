@@ -39,18 +39,40 @@ async def chat_with_agent(agent, runner, user_message: str, session_id=None):
                 app_name=app_name, user_id=user_id
             )
 
+    import asyncio
+
     content = types.Content(
         role="user",
         parts=[types.Part.from_text(text=user_message)],
     )
 
-    final_response = ""
-    async for event in runner.run_async(
-        user_id=user_id, session_id=session.id, new_message=content
-    ):
-        if hasattr(event, "content") and event.content and event.content.parts:
-            for part in event.content.parts:
-                if hasattr(part, "text") and part.text:
-                    final_response += part.text
-
-    return final_response, session
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            final_response = ""
+            async for event in runner.run_async(
+                user_id=user_id, session_id=session.id, new_message=content
+            ):
+                if hasattr(event, "content") and event.content and event.content.parts:
+                    for part in event.content.parts:
+                        if hasattr(part, "text") and part.text:
+                            final_response += part.text
+            return final_response, session
+        except Exception as e:
+            import re
+            err_str = str(e).lower()
+            if (
+                "429" in err_str
+                or "resource_exhausted" in err_str
+                or "503" in err_str
+                or "unavailable" in err_str
+            ) and attempt < max_retries - 1:
+                match = re.search(r"retry\s+in\s+(\d+(?:\.\d+)?)s", err_str)
+                if match:
+                    wait_time = float(match.group(1)) + 3.0
+                else:
+                    wait_time = 33.0 if "429" in err_str or "resource_exhausted" in err_str else (attempt + 1) * 8
+                print(f"[API Throttled] Waiting {wait_time:.1f}s before retry...")
+                await asyncio.sleep(wait_time)
+            else:
+                raise e

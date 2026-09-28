@@ -51,16 +51,35 @@ def detect_injection(user_input: str) -> InputStatus:
     Returns:
         ``"BLOCK"`` if injection detected (chặn), ``"ALLOW"`` otherwise (cho qua).
     """
+    # Canonicalize Unicode & strip zero-width / invisible characters (e.g. \u200b, \u200c, \u200d, \ufeff)
+    import unicodedata
+    normalized = re.sub(r"[\u200b\u200c\u200d\ufeff\u00ad]", "", user_input)
+    normalized = unicodedata.normalize("NFKC", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+
     INJECTION_PATTERNS = [
-        # TODO: Add at least 5 regex patterns
-        # Example:
-        # r"ignore (all )?(previous|above) instructions",
+        r"ignore\s+(all\s+)?(previous|above)\s+instructions",
+        r"you\s+are\s+now\b",
+        r"system\s+prompt\b",
+        r"reveal\s+(your\s+|the\s+)?(internal\s+|admin\s+)?(instructions|prompt|password)",
+        r"(reveal|show\s+me)\s+(the\s+|your\s+)?(admin\s+|internal\s+)?(password|secret|key)",
+        r"pretend\s+(that\s+)?you\s+are\b",
+        r"act\s+as\s+(a\s+|an\s+)?unrestricted\b",
+        r"disregard\s+(all\s+)?(previous|above)\s+instructions",
     ]
 
     for pattern in INJECTION_PATTERNS:
-        if re.search(pattern, user_input, re.IGNORECASE):
+        if re.search(pattern, normalized, re.IGNORECASE):
             return "BLOCK"
     return "ALLOW"
+
+
+def _normalize_text_for_topic(text: str) -> str:
+    """Normalize text and remove Vietnamese accents for topic matching."""
+    import unicodedata
+    nfkd_form = unicodedata.normalize("NFKD", text.lower())
+    unaccented = "".join([c for c in nfkd_form if not unicodedata.combining(c)]).replace("đ", "d").replace("Đ", "D")
+    return unaccented
 
 
 # ============================================================
@@ -85,13 +104,28 @@ def topic_filter(user_input: str) -> InputStatus:
         ``"ALLOW"`` = cho qua (câu banking hợp lệ).
     """
     input_lower = user_input.lower()
+    input_unaccented = _normalize_text_for_topic(user_input)
 
-    # TODO: Implement logic:
     # 1. If input contains any blocked topic -> return "BLOCK"
-    # 2. If input doesn't contain any allowed topic -> return "BLOCK"
-    # 3. Otherwise -> return "ALLOW"
+    for topic in BLOCKED_TOPICS:
+        pattern = r"\b" + re.escape(topic.lower()) + r"\b"
+        if re.search(pattern, input_lower) or re.search(pattern, input_unaccented):
+            return "BLOCK"
 
-    pass  # Replace with your implementation
+    # 2. If input doesn't contain any allowed topic -> return "BLOCK"
+    found_allowed = False
+    for topic in ALLOWED_TOPICS:
+        t_low = topic.lower()
+        t_unaccented = _normalize_text_for_topic(topic)
+        if t_low in input_lower or t_unaccented in input_unaccented:
+            found_allowed = True
+            break
+
+    if not found_allowed:
+        return "BLOCK"
+
+    # 3. Otherwise -> return "ALLOW"
+    return "ALLOW"
 
 
 # ============================================================
@@ -144,14 +178,22 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
         self.total_count += 1
         text = self._extract_text(user_message)
 
-        # TODO: Implement logic:
         # 1. Call detect_injection(text)
-        #    - If "BLOCK": increment blocked_count, return self._block_response("...")
-        # 2. Call topic_filter(text)
-        #    - If "BLOCK": increment blocked_count, return self._block_response("...")
-        # 3. If both return "ALLOW": return None (let message through)
+        if detect_injection(text) == "BLOCK":
+            self.blocked_count += 1
+            return self._block_response(
+                "Yêu cầu bị từ chối: Phát hiện dấu hiệu tấn công prompt injection."
+            )
 
-        pass  # Replace with your implementation
+        # 2. Call topic_filter(text)
+        if topic_filter(text) == "BLOCK":
+            self.blocked_count += 1
+            return self._block_response(
+                "Yêu cầu bị từ chối: Nội dung không thuộc phạm vi hỗ trợ ngân hàng VinBank."
+            )
+
+        # 3. If both return "ALLOW": return None (let message through)
+        return None
 
 
 # ============================================================
